@@ -5,11 +5,16 @@ name: Release
 # releases page and nobody has to install a cross-compiler to get it.
 on:
   push:
-    tags: [ 'v*' ]
+    # Both spellings: 'v0.1' and a bare '0.1'. Matching only 'v*' silently does
+    # nothing for a tag like 0.1, and the release then shows just GitHub's
+    # automatic source archives with no payload attached.
+    tags:
+      - 'v[0-9]*'
+      - '[0-9]*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish (e.g. v0.3)'
+        description: 'Existing tag to build and attach the payload to (e.g. 0.1)'
         required: true
 
 permissions:
@@ -21,7 +26,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # For a manual run the tag has to be named explicitly, or checkout takes
+      # the default branch and would publish whatever is on main rather than
+      # what the tag points at.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install toolchain
         run: |
