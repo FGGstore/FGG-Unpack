@@ -1,0 +1,135 @@
+# Console build.
+#
+#   export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+#   make -f Makefile.ps5            # build fgg-unpack.elf
+#   make -f Makefile.ps5 test       # build and send it to the console
+#
+# Verified against ps5-payload-dev/sdk (the include path, the variables
+# prospero.mk defines, and the deploy/debug targets are copied from
+# samples/hello_world/Makefile). NOT verified by actually running it: no SDK is
+# installed on the machine this was written on. Milestone 1 is that run.
+#
+# The SDK installs to /opt/ps5-payload-sdk by default and needs clang and lld
+# on the host. It does not run on Windows directly; use WSL.
+
+PS5_HOST ?= ps5
+PS5_PORT ?= 9021
+
+# prospero.mk defines CC, LD, AR, STRIP and PS5_DEPLOY, all pointing at the
+# prospero-* wrappers in the SDK. It is generated at install time, which is why
+# it exists under $(PS5_PAYLOAD_SDK) but not in the SDK source tree.
+ifdef PS5_PAYLOAD_SDK
+    include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+else
+    $(error PS5_PAYLOAD_SDK is undefined)
+endif
+
+ELF   := fgg-unpack.elf
+BUILD := build/ps5
+MINIZ := third_party/miniz
+LZMA  := third_party/lzma
+
+# UA_TARGET_PS5 switches ua_plat_posix.c onto the console notification call;
+# everything else in the tree is platform-neutral.
+#
+# MINIZ_NO_ZLIB_COMPATIBLE_NAMES drops the static inline zlib aliases (crc32,
+# inflate, uncompress and friends) that miniz.h defines in every translation
+# unit that includes it. We only ever call the mz_* names, and unused static
+# functions are an error under -Werror. It is deliberately not in MINIZ_CFLAGS:
+# miniz's own sources may use those aliases internally.
+CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -DUA_TARGET_PS5 \
+          -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES -I$(MINIZ) -I$(LZMA) -Isrc
+
+# Vendored code is not ours to keep warning-clean, so it is built without
+# -Werror rather than patched.
+MINIZ_CFLAGS := -std=c11 -w -O2 -I$(MINIZ)
+
+# _7ZIP_ST builds the LZMA SDK single-threaded: the payload extracts one
+# archive at a time (FR-8), and a thread pool on the console buys nothing but
+# risk.
+LZMA_CFLAGS := -std=c11 -w -O2 -D_7ZIP_ST -I$(LZMA)
+
+SRCS := \
+    src/ua_common.c \
+    src/core/ua_path.c \
+    src/core/ua_log.c \
+    src/core/ua_extract.c \
+    src/core/ua_config.c \
+    src/core/ua_queue.c \
+    src/core/ua_status.c \
+    src/core/ua_driver.c \
+    src/backend/ua_backend.c \
+    src/backend/ua_detect.c \
+    src/backend/ua_be_zip.c \
+    src/backend/ua_be_7z.c \
+    src/platform/ua_plat_posix.c \
+    src/main_ps5.c
+
+MINIZ_SRCS := \
+    $(MINIZ)/miniz.c \
+    $(MINIZ)/miniz_tinfl.c \
+    $(MINIZ)/miniz_tdef.c \
+    $(MINIZ)/miniz_zip.c
+
+# 7zDec.c is needed even though this project never calls SzArEx_Extract: a 7z
+# header is itself usually LZMA-compressed, and SzArEx_Open decodes it through
+# SzAr_DecodeFolder. The filters come with it. PPMD stays out, gated off by
+# Z7_PPMD_SUPPORT.
+LZMA_SRCS := \
+    $(LZMA)/7zArcIn.c \
+    $(LZMA)/7zAlloc.c \
+    $(LZMA)/7zBuf.c \
+    $(LZMA)/7zCrc.c \
+    $(LZMA)/7zCrcOpt.c \
+    $(LZMA)/7zDec.c \
+    $(LZMA)/7zStream.c \
+    $(LZMA)/Bcj2.c \
+    $(LZMA)/Bra.c \
+    $(LZMA)/Bra86.c \
+    $(LZMA)/BraIA64.c \
+    $(LZMA)/CpuArch.c \
+    $(LZMA)/Delta.c \
+    $(LZMA)/LzmaDec.c \
+    $(LZMA)/Lzma2Dec.c
+
+OBJS       := $(patsubst %.c,$(BUILD)/%.o,$(SRCS))
+MINIZ_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(MINIZ_SRCS))
+LZMA_OBJS  := $(patsubst %.c,$(BUILD)/%.o,$(LZMA_SRCS))
+
+.PHONY: all clean test debug
+
+all: $(ELF)
+
+$(ELF): $(OBJS) $(MINIZ_OBJS) $(LZMA_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/$(MINIZ)/%.o: $(MINIZ)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(MINIZ_CFLAGS) -c -o $@ $<
+
+$(BUILD)/$(LZMA)/%.o: $(LZMA)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(LZMA_CFLAGS) -c -o $@ $<
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Sends the payload to the console. Port 9021 is the payload port the
+# requirements name; PS5_HOST is a hostname or IP.
+test: $(ELF)
+	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $^
+
+# Section 9 calls the target hard to debug, which is why the host harness
+# exists. When the console is unavoidable, the SDK exposes a gdb stub on 2159.
+debug: $(ELF)
+	gdb-multiarch \
+	-ex "set architecture i386:x86-64" \
+	-ex "target extended-remote $(PS5_HOST):2159" \
+	-ex "file $(ELF)" \
+	-ex "remote put $(ELF) /data/$(ELF)" \
+	-ex "set remote exec-file /data/$(ELF)" \
+	-ex "start"
+
+clean:
+	rm -rf $(BUILD) $(ELF)

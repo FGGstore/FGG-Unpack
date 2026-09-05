@@ -1,0 +1,96 @@
+name: Release
+
+# Tag a version and the payload is built and published automatically, so the
+# thing people actually want -- fgg-unpack.elf -- is one click from the
+# releases page and nobody has to install a cross-compiler to get it.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.3)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and publish payload
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          # llvm is required but is not in the SDK's documented dependency
+          # list: without llvm-config the wrapper fails with a confusing
+          # "/llvm-clang: No such file or directory".
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm make unzip curl
+
+      - name: Install PS5 Payload SDK
+        run: |
+          curl -sSL -o sdk.zip \
+            https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
+          sudo unzip -q -o -d /opt sdk.zip
+          sudo chmod -R +x /opt/ps5-payload-sdk/bin
+
+      - name: Build
+        run: |
+          export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+          make -f Makefile.ps5
+          file fgg-unpack.elf
+
+      # Payload Manager reads this alongside the ELF, so installing from a
+      # release is a copy of two files into /data/pldmgr/payloads/fgg-unpack/.
+      - name: Generate payload metadata
+        run: |
+          VERSION="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          SHA=$(sha256sum fgg-unpack.elf | cut -d' ' -f1)
+          cat > fgg-unpack.elf.json <<EOF
+          {
+            "name": "FGG Unpack",
+            "filename": "fgg-unpack.elf",
+            "description": "Extracts zip and 7z archives on-console from watched directories",
+            "version": "${VERSION}",
+            "checksum": "${SHA}",
+            "category": "Utilities",
+            "source": "https://github.com/FGGstore/FGG-Unpack"
+          }
+          EOF
+          sha256sum fgg-unpack.elf | tee SHA256SUMS
+          cat fgg-unpack.elf.json
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: FGG Unpack ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            fgg-unpack.elf
+            fgg-unpack.elf.json
+            SHA256SUMS
+          body: |
+            ## Install
+
+            **Payload Manager** — copy `fgg-unpack.elf` and `fgg-unpack.elf.json`
+            into `/data/pldmgr/payloads/fgg-unpack/` over FTP, then launch
+            **FGG Unpack**.
+
+            **Direct** — send `fgg-unpack.elf` to port 9021 with any payload sender.
+
+            **Autostart** — add `fgg-unpack.elf` to `/data/pldmgr/autoload.txt`.
+
+            ## First run
+
+            Creates `/data/fgg-unpack/config.ini` with defaults and watches
+            `/data/homebrew`. Drop a `.zip` or `.7z` in there and it extracts in
+            place. Progress arrives as a notification every 5% and is written to
+            `/data/fgg-unpack/debug.log`.
+
+            Verify your download against `SHA256SUMS`.

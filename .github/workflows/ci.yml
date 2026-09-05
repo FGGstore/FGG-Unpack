@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # The extraction core is portable C, so the host harness is what actually
+  # gates a change. Section 9 of the requirements makes this the primary test:
+  # only platform integration needs a console.
+  host-tests:
+    name: Host tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # The corpus is generated, not committed. 7-Zip is present on GitHub's
+      # Windows runners, so the 7z cases run too; gen_corpus.py skips them
+      # rather than failing if it is missing.
+      - name: Generate test corpus
+        run: python tools/gen_corpus.py
+
+      - name: Build and run tests
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File tools/run_tests.ps1
+
+      - name: Upload log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log
+          path: build/tmp/test.log
+
+  # Proves the payload still cross-compiles. It cannot be run here, so this is
+  # a compile-and-link gate only -- which is exactly what caught the trigraph
+  # and the miniz zlib-alias problems that MSVC accepted silently.
+  ps5-build:
+    name: PS5 payload build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          # llvm is not in the SDK's documented dependency list but is
+          # required: without llvm-config the toolchain wrapper fails with a
+          # confusing "/llvm-clang: No such file or directory".
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm make unzip curl
+
+      - name: Install PS5 Payload SDK
+        run: |
+          curl -sSL -o sdk.zip \
+            https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
+          sudo unzip -q -o -d /opt sdk.zip
+          sudo chmod -R +x /opt/ps5-payload-sdk/bin
+
+      - name: Build fgg-unpack.elf
+        run: |
+          export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+          make -f Makefile.ps5
+          ls -l fgg-unpack.elf
+          file fgg-unpack.elf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fgg-unpack.elf
+          path: fgg-unpack.elf

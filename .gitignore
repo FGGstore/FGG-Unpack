@@ -1,0 +1,25 @@
+# Build output
+build/
+*.elf
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.o
+*.a
+
+# The test corpus is generated, never committed: tools/gen_corpus.py rebuilds
+# it, and a repository full of path-traversal and decompression-bomb archives
+# is an awkward thing to hand people.
+tests/corpus/
+
+# Host CLI log
+fgg-unpack-host.log
+unarchiver-host.log
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
